@@ -592,3 +592,114 @@ run_one_ct <- function(ct) {
   invisible(TRUE)}
 invisible(lapply(target_celltypes, run_one_ct))
 
+###BBB_related_pathway_check###
+library(readxl)
+library(dplyr)
+library(Matrix)
+library(AUCell)
+library(ggplot2)
+library(tidyr)
+seurat_integrated <- scRNA_harmony
+terms <- read_excel("Blood–Brain Barrier (BBB)-related signaling pathways.xlsx")
+seurat_integrated <- JoinLayers(seurat_integrated)
+expr_matrix <- LayerData(seurat_integrated, layer = "data")
+expr_matrix <- as(expr_matrix, "dgCMatrix")
+cells_rankings <- AUCell_buildRankings(
+  expr_matrix,
+  plotStats = FALSE,
+  splitByBlocks = TRUE
+)
+bubble_list <- list()
+for (col_name in colnames(terms)) {
+  geneset <- terms[[col_name]]
+  geneset <- geneset[!is.na(geneset)]
+  valid_genes <- intersect(geneset, rownames(expr_matrix))
+  if (length(valid_genes) < 5) {
+    cat("Skipping:", col_name, "(too few genes)\n")
+    next
+  }
+  gene_sets <- list(current_set = valid_genes)
+  cells_AUC <- AUCell_calcAUC(
+    gene_sets,
+    cells_rankings,
+    aucMaxRank = ceiling(0.05 * nrow(cells_rankings))
+  )
+  auc_scores <- as.numeric(getAUC(cells_AUC)["current_set", ])
+  auc_col_name <- paste0("AUC_", col_name)
+  seurat_integrated@meta.data[[auc_col_name]] <- auc_scores
+  tmp <- seurat_integrated@meta.data %>%
+    group_by(celltype) %>%
+    summarise(
+      auc_mean = mean(.data[[auc_col_name]], na.rm = TRUE),
+      n_cells = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(pathway = col_name)
+  bubble_list[[col_name]] <- tmp
+}
+bubble_df <- bind_rows(bubble_list)
+p <- ggplot(bubble_df,aes(x = celltype, y = pathway, 
+                          size = n_cells, color = auc_mean)) +
+  geom_point(alpha = 0.9) +
+  scale_size(range = c(2, 12)) +
+  scale_color_gradientn(colors = c("#2166AC", "white", "#B2182B")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10)) +
+  labs(x = "Cell Types",y = "",
+       color = "AUC Score",
+       size = "Number of Cells",
+       title = "")
+print(p)
+#AUC_box#
+plot_AUC_box <- function(
+    seurat_obj,
+    pathways,
+    celltypes,
+    disease_col = "disease",
+    celltype_col = "celltype"
+){
+  library(ggplot2)
+  library(dplyr)
+  df <- seurat_obj@meta.data %>%
+    filter(.data[[celltype_col]] %in% celltypes)
+  auc_cols <- paste0("AUC_", pathways)
+  plot_df <- df %>%
+    select(all_of(c(celltype_col, disease_col, auc_cols))) %>%
+    pivot_longer(
+      cols = all_of(auc_cols),
+      names_to = "pathway",
+      values_to = "AUC"
+    ) %>%
+    mutate(
+      pathway = gsub("AUC_", "", pathway),
+      celltype = factor(.data[[celltype_col]], levels = celltypes),
+      disease = factor(.data[[disease_col]], levels = c("AD","NC"))
+    )
+  p <- ggplot(plot_df, aes(x = celltype, y = AUC, fill = disease)) +
+    geom_boxplot(position = position_dodge(0.8), width = 0.7, outlier.size = 0.5) +
+    facet_wrap(~ pathway, scales = "free_y") +
+    scale_fill_manual(values = c("NC" = "#1f77b4", "AD" = "#ff7f0e"),name = " ") +
+    theme_classic() +
+    labs(
+      x = "Cell Type",
+      y = "AUC Score",
+      title = " "
+    ) +
+    theme(
+      legend.position = "top",
+      legend.text  = element_text(size = 14),                  
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+      axis.title.x = element_text(size = 14, face = "bold"),
+      axis.text.y = element_text(size = 12),
+      axis.title.y = element_text(size = 14, face = "bold"),
+      strip.text = element_text(size = 12, face = "bold")
+    )
+  print(p)}
+plot_AUC_box(
+  seurat_obj = seurat_integrated,
+  pathways = c("Tight junction", "Adherens junction", "Leukocyte transendothelial migration",
+               "VEGF signaling pathway", "Wnt signaling pathway", "ECM-receptor interaction"),
+  celltypes = c('astrocytes_1',"microglia_1","oligodendrocyte_1", "oligodendrocyte_3",
+                "excitatory_neuron_5","endothelial_cell_1")
+)
